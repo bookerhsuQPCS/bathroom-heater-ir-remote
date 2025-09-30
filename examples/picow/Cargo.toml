@@ -41,7 +41,8 @@ serde           = { version = "1.0.203", default-features = false, features = ["
 serde-json-core = "0.5.1"
 
 # for assign resources example
-assign-resources = { git = "https://github.com/adamgreig/assign-resources", rev = "bd22cb7a92031fb16f74a5da42469d466c33383e" }
+#assign-resources = { git = "https://github.com/adamgreig/assign-resources", rev = "bd22cb7a92031fb16f74a5da42469d466c33383e" }
+assign-resources = { path = "../../third_party/assign-resources", default-features = false}
 
 #cortex-m = { version = "0.7.6", features = ["critical-section-single-core"] }
 cortex-m         = { version = "0.7.6", features = ["inline-asm"] }
@@ -69,18 +70,10 @@ rand               = { version = "0.9.0", default-features = false }
 embedded-sdmmc     = "0.7.0"
 infrared           = { version = "0.14.2", default-features = false, features = ["nec", "rc5", "rc6"] }
 fugit              = "0.3"
-onewire            = { path = "../../third_party/onewire", default-features = false, features = ["defmt"] }
-
-# 改成本機 path；停用預設功能，顯式開 graphics + async
-ssd1306 = { path = "../../third_party/ssd1306", default-features = false, features = ["graphics", "async"] }
 
 itoa = "1"
-u8g2-fonts = { version = "0.7.1", default-features = false, features = ["embedded_graphics_textstyle"] }
 
 [profile.release]
 # 保留除錯符號，方便抓 log/backtrace
 debug = true
 
-[patch.crates-io]
-# 強制所有相依都使用本機 ssd1306
-ssd1306 = { path = "../../third_party/ssd1306" }

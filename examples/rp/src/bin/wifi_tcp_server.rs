@@ -27,8 +27,8 @@ bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => InterruptHandler<PIO0>;
 });
 
-const WIFI_NETWORK: &str = "ssid"; // change to your network SSID
-const WIFI_PASSWORD: &str = "pwd"; // change to your network password
+const WIFI_NETWORK: &str = "WAX2617"; // change to your network SSID
+const WIFI_PASSWORD: &str = "7499363II5495264"; // change to your network password
 
 #[embassy_executor::task]
 async fn cyw43_task(runner: cyw43::Runner<'static, Output<'static>, PioSpi<'static, PIO0, 0, DMA_CH0>>) -> ! {

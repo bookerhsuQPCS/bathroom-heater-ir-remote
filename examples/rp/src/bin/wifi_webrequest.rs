@@ -1,5 +1,6 @@
-//! This example uses the RP Pico W board Wifi chip (cyw43).
-//! Connects to Wifi network and makes a web request to get the current time.
+// src/bin/wifi_webrequest.rs
+//! RP Pico W: 連 Wi-Fi，DHCP 完成印 IPv4；依 URL 自動測 HTTP/HTTPS，請求期間切 Performance + 亮 CYW43 LED。
+//! 固件路徑維持 ../../../../cyw43-firmware/...
 
 #![no_std]
 #![no_main]
@@ -10,6 +11,7 @@ use core::str::from_utf8;
 use cyw43::JoinOptions;
 use cyw43_pio::{PioSpi, DEFAULT_CLOCK_DIVIDER};
 use defmt::*;
+use defmt::Debug2Format;
 use embassy_executor::Spawner;
 use embassy_net::dns::DnsSocket;
 use embassy_net::tcp::client::{TcpClient, TcpClientState};
@@ -22,19 +24,30 @@ use embassy_rp::pio::{InterruptHandler, Pio};
 use embassy_time::{Duration, Timer};
 use reqwless::client::{HttpClient, TlsConfig, TlsVerify};
 use reqwless::request::Method;
-use serde::Deserialize;
 use static_cell::StaticCell;
-use {defmt_rtt as _, panic_probe as _, serde_json_core};
+use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => InterruptHandler<PIO0>;
 });
 
-const WIFI_NETWORK: &str = "ssid"; // change to your network SSID
-const WIFI_PASSWORD: &str = "pwd"; // change to your network password
+// 換成你的 Wi-Fi
+const WIFI_NETWORK: &str = "WAX2617";
+const WIFI_PASSWORD: &str = "7499363II5495264";
+
+// 測試清單：先 HTTP，再 HTTPS
+const TEST_URLS: &[&str] = &[
+    "http://neverssl.com/",
+    "http://httpbin.org/get",
+    "https://example.com/",
+    "https://httpbin.org/get",
+    // "https://worldtimeapi.org/api/timezone/Europe/Berlin",
+];
 
 #[embassy_executor::task]
-async fn cyw43_task(runner: cyw43::Runner<'static, Output<'static>, PioSpi<'static, PIO0, 0, DMA_CH0>>) -> ! {
+async fn cyw43_task(
+    runner: cyw43::Runner<'static, Output<'static>, PioSpi<'static, PIO0, 0, DMA_CH0>>,
+) -> ! {
     runner.run().await
 }
 
@@ -50,15 +63,11 @@ async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
     let mut rng = RoscRng;
 
+    // 固件檔（從 src/bin/ 回到 repo 根）
     let fw = include_bytes!("../../../../cyw43-firmware/43439A0.bin");
     let clm = include_bytes!("../../../../cyw43-firmware/43439A0_clm.bin");
-    // To make flashing faster for development, you may want to flash the firmwares independently
-    // at hardcoded addresses, instead of baking them into the program with `include_bytes!`:
-    //     probe-rs download 43439A0.bin --binary-format bin --chip RP2040 --base-address 0x10100000
-    //     probe-rs download 43439A0_clm.bin --binary-format bin --chip RP2040 --base-address 0x10140000
-    // let fw = unsafe { core::slice::from_raw_parts(0x10100000 as *const u8, 230321) };
-    // let clm = unsafe { core::slice::from_raw_parts(0x10140000 as *const u8, 4752) };
 
+    // CYW43 / PIO / SPI
     let pwr = Output::new(p.PIN_23, Level::Low);
     let cs = Output::new(p.PIN_25, Level::High);
     let mut pio = Pio::new(p.PIO0, Irqs);
@@ -83,23 +92,14 @@ async fn main(spawner: Spawner) {
         .set_power_management(cyw43::PowerManagementMode::PowerSave)
         .await;
 
+    // 網路堆疊（DHCPv4）
     let config = Config::dhcpv4(Default::default());
-    // Use static IP configuration instead of DHCP
-    //let config = embassy_net::Config::ipv4_static(embassy_net::StaticConfigV4 {
-    //    address: Ipv4Cidr::new(Ipv4Address::new(192, 168, 69, 2), 24),
-    //    dns_servers: Vec::new(),
-    //    gateway: Some(Ipv4Address::new(192, 168, 69, 1)),
-    //});
-
-    // Generate random seed
     let seed = rng.next_u64();
-
-    // Init network stack
     static RESOURCES: StaticCell<StackResources<5>> = StaticCell::new();
     let (stack, runner) = embassy_net::new(net_device, config, RESOURCES.init(StackResources::new()), seed);
-
     unwrap!(spawner.spawn(net_task(runner)));
 
+    // 連 Wi-Fi
     while let Err(err) = control
         .join(WIFI_NETWORK, JoinOptions::new(WIFI_PASSWORD.as_bytes()))
         .await
@@ -113,73 +113,102 @@ async fn main(spawner: Spawner) {
     info!("waiting for DHCP...");
     stack.wait_config_up().await;
 
-    // And now we can use it!
+    // DHCP 完成：印本機 IPv4 / gateway
+    if let Some(cfg) = stack.config_v4() {
+        info!("IPv4 addr: {}  gw: {}", cfg.address, cfg.gateway);
+    }
     info!("Stack is up!");
 
-    // And now we can use it!
-
     loop {
-        let mut rx_buffer = [0; 8192];
-        let mut tls_read_buffer = [0; 16640];
-        let mut tls_write_buffer = [0; 16640];
-
+        // 每輪都新建 client，避免狀態殘留
         let client_state = TcpClientState::<1, 1024, 1024>::new();
-        let tcp_client = TcpClient::new(stack, &client_state);
-        let dns_client = DnsSocket::new(stack);
-        let tls_config = TlsConfig::new(seed, &mut tls_read_buffer, &mut tls_write_buffer, TlsVerify::None);
+        let tcp_client   = TcpClient::new(stack, &client_state);
+        let dns_client   = DnsSocket::new(stack);
 
-        let mut http_client = HttpClient::new_with_tls(&tcp_client, &dns_client, tls_config);
-        let url = "https://worldtimeapi.org/api/timezone/Europe/Berlin";
-        // for non-TLS requests, use this instead:
-        // let mut http_client = HttpClient::new(&tcp_client, &dns_client);
-        // let url = "http://worldtimeapi.org/api/timezone/Europe/Berlin";
+        for &url in TEST_URLS {
+            let is_https = url.as_bytes().starts_with(b"https://");
 
-        info!("connecting to {}", &url);
+            // 請求期間：切 Performance + 亮 CYW43 LED
+            control
+                .set_power_management(cyw43::PowerManagementMode::Performance)
+                .await;
+            control.gpio_set(0, true).await;
 
-        let mut request = match http_client.request(Method::GET, &url).await {
-            Ok(req) => req,
-            Err(e) => {
-                error!("Failed to make HTTP request: {:?}", e);
-                return; // handle the error
+            info!("connecting to {}", url);
+
+            if is_https {
+                // —— HTTPS 分支：把 TLS buffer / client / request / response 全部包在更小作用域 —— //
+                {
+                    let mut rx_buffer        = [0u8; 8192];
+                    let mut tls_read_buffer  = [0u8; 16_640];
+                    let mut tls_write_buffer = [0u8; 16_640];
+
+                    let tls_config = TlsConfig::new(
+                        seed,
+                        &mut tls_read_buffer,
+                        &mut tls_write_buffer,
+                        TlsVerify::None, // 若要驗證憑證，之後可改
+                    );
+
+                    {
+                        let mut https_client = HttpClient::new_with_tls(&tcp_client, &dns_client, tls_config);
+
+                        // 最後的 match 都加分號，確保成「語句」→ 其暫時值會立刻 drop
+                        match https_client.request(Method::GET, url).await {
+                            Ok(mut req) => {
+                                match req.send(&mut rx_buffer).await {
+                                    Ok(resp) => {
+                                        match from_utf8(resp.body().read_to_end().await.unwrap()) {
+                                            Ok(b) => {
+                                                let preview_len = b.len().min(200);
+                                                info!("{} ok, {} bytes; preview:\n{:?}", url, b.len(), &b[..preview_len]);
+                                            }
+                                            Err(e) => error!("Failed to read HTTPS body: {}", Debug2Format(&e)),
+                                        }
+                                    }
+                                    Err(e) => error!("Failed to send HTTPS request: {}", Debug2Format(&e)),
+                                }
+                            }
+                            Err(e) => error!("Failed to make HTTPS request: {}", Debug2Format(&e)),
+                        };
+                    } // ← https_client 在這裡 drop
+                } // ← tls_* 與 rx_buffer 在這裡 drop
+            } else {
+                // —— HTTP 分支：同理全部包起來 —— //
+                {
+                    let mut rx_buffer = [0u8; 8192];
+                    let mut http_client = HttpClient::new(&tcp_client, &dns_client);
+
+                    match http_client.request(Method::GET, url).await {
+                        Ok(mut req) => {
+                            match req.send(&mut rx_buffer).await {
+                                Ok(resp) => {
+                                    match from_utf8(resp.body().read_to_end().await.unwrap()) {
+                                        Ok(b) => {
+                                            let preview_len = b.len().min(200);
+                                            info!("{} ok, {} bytes; preview:\n{:?}", url, b.len(), &b[..preview_len]);
+                                        }
+                                        Err(e) => error!("Failed to read HTTP body: {}", Debug2Format(&e)),
+                                    }
+                                }
+                                Err(e) => error!("Failed to send HTTP request: {}", Debug2Format(&e)),
+                            }
+                        }
+                        Err(e) => error!("Failed to make HTTP request: {}", Debug2Format(&e)),
+                    };
+                } // ← http_client / rx_buffer 在這裡 drop
             }
-        };
 
-        let response = match request.send(&mut rx_buffer).await {
-            Ok(resp) => resp,
-            Err(_e) => {
-                error!("Failed to send HTTP request");
-                return; // handle the error;
-            }
-        };
+            // 收尾：省電 & LED off
+            control
+                .set_power_management(cyw43::PowerManagementMode::PowerSave)
+                .await;
+            control.gpio_set(0, false).await;
 
-        let body = match from_utf8(response.body().read_to_end().await.unwrap()) {
-            Ok(b) => b,
-            Err(_e) => {
-                error!("Failed to read response body");
-                return; // handle the error
-            }
-        };
-        info!("Response body: {:?}", &body);
-
-        // parse the response body and update the RTC
-
-        #[derive(Deserialize)]
-        struct ApiResponse<'a> {
-            datetime: &'a str,
-            // other fields as needed
+            Timer::after(Duration::from_secs(2)).await;
         }
 
-        let bytes = body.as_bytes();
-        match serde_json_core::de::from_slice::<ApiResponse>(bytes) {
-            Ok((output, _used)) => {
-                info!("Datetime: {:?}", output.datetime);
-            }
-            Err(_e) => {
-                error!("Failed to parse response body");
-                return; // handle the error
-            }
-        }
-
-        Timer::after(Duration::from_secs(5)).await;
+        // 休息一下再跑下一輪
+        Timer::after(Duration::from_secs(10)).await;
     }
 }

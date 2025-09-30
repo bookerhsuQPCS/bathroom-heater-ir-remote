@@ -1,0 +1,13 @@
+# Embed.toml（新版 cargo-embed 可用）
+[default.general]
+chip = "RP2040"
+log_level = "INFO"
+connect_under_reset = false
+
+[default.probe]
+protocol = "Swd"
+speed = 4000
+
+[default.rtt]
+enabled = true
+timeout = 3000

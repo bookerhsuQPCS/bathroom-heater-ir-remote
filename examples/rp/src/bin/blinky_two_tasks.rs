@@ -21,7 +21,7 @@ static LED: LedType = Mutex::new(None);
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
     // set the content of the global LED reference to the real LED pin
-    let led = Output::new(p.PIN_25, Level::High);
+    let led = Output::new(p.PIN_21, Level::High);
     // inner scope is so that once the mutex is written to, the MutexGuard is dropped, thus the
     // Mutex is released
     {
